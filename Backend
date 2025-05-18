@@ -1,0 +1,165 @@
+import os
+import base64
+import json
+import requests
+import openai
+from flask import Flask, request, jsonify, render_template_string, send_file
+from PIL import Image
+import uuid
+from dotenv import load_dotenv
+from flask_cors import CORS
+
+# Load environment variables
+load_dotenv()
+
+app = Flask(__name__, static_folder='static', static_url_path='/static')
+CORS(app)
+
+# === Configuration ===
+DATA_DIR = "data"
+os.makedirs(os.path.join(DATA_DIR, 'images_to_classify'), exist_ok=True)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
+
+# === Helpers ===
+def encode_image_base64(image_bytes):
+    return base64.b64encode(image_bytes).decode('utf-8')
+
+def call_gemini_api(image_bytes):
+    print(f"Calling Gemini API for image")
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "text": "Analyze this medical image for signs of trauma. Provide a diagnosis and detailed observations in the format: Diagnosis: [diagnosis]\nDetails: [details]."
+                },
+                {
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": encode_image_base64(image_bytes)
+                    }
+                }
+            ]
+        }]
+    }
+    try:
+        resp = requests.post(f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        if not text:
+            print("No response from Gemini API")
+            return "Unknown", "No response from API"
+        lines = text.split("\n")
+        diagnosis = lines[0].replace("Diagnosis: ", "") if lines and "Diagnosis:" in lines[0] else "Unknown"
+        details = "\n".join(lines[1:]).replace("Details: ", "") if len(lines) > 1 else "No details provided"
+        return diagnosis, details
+    except requests.exceptions.RequestException as e:
+        print(f"Gemini API error: {e}")
+        return "Error", f"Failed to process image: {str(e)}"
+
+def call_openai_api(diagnosis, details):
+    print(f"Calling OpenAI API for diagnosis: {diagnosis}")
+    prompt = f"""
+You are an expert paramedic assistant. A patient is experiencing: {diagnosis} ({details}).
+Provide a step-by-step first-aid procedure to help the patient until professional help arrives.
+Return the response as a JSON array of steps, where each step is an object with keys:
+  - icon: filename or URL for an icon representing the step (e.g., /static/icons/phone.png)
+  - text: instruction text
+  - duration: time in milliseconds to display this step
+Do not include any additional text outside the JSON array.
+"""
+    try:
+        completion = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        content = completion.choices[0].message.content.strip()
+        return json.loads(content)
+    except Exception as e:
+        print(f"OpenAI API error: {e}")
+        return [
+            {"icon": "/static/icons/phone.png", "text": "Call emergency services immediately.", "duration": 5000},
+            {"icon": "/static/icons/cpr.png", "text": "Monitor patient and wait for help.", "duration": 5000}
+        ]
+
+def generate_animation_html(steps):
+    print("Generating animation HTML")
+    scenes = []
+    default_dur = 5000
+    for idx, step in enumerate(steps, start=1):
+        active = ' active' if idx == 1 else ''
+        dur = step.get('duration', default_dur)
+        scenes.append(f"""
+  <div id=\"scene{idx}\" class=\"scene{active}\" data-duration=\"{dur}\">  
+    <img src=\"{step.get('icon')}\" class=\"icon\" />  
+    <div class=\"text\">{step.get('text')}</div>  
+  </div>""")
+    return f"""<!DOCTYPE html>
+<html lang=\"en\">  
+<head>  
+  <meta charset=\"UTF-8\">  
+  <title>Trauma Aid Animation</title>  
+  <style>  
+    body, html {{margin:0;padding:0;width:100%;height:100%;overflow:hidden;font-family:sans-serif;background:#f0f0f0;}}  
+    .scene {{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity 1s;}}  
+    .scene.active {{opacity:1;}}  
+    .icon {{width:150px;height:150px;margin-bottom:1rem;}}  
+    .text {{font-size:1.5rem;text-align:center;max-width:80%;}}  
+  </style>  
+</head>  
+<body>  
+{''.join(scenes)}  
+  <script>  
+    const scenes = document.querySelectorAll('.scene');  
+    let current=0;  
+    function next() {{  
+      scenes[current].classList.remove('active');  
+      current=(current+1)%scenes.length;  
+      scenes[current].classList.add('active');  
+      const d=scenes[current].dataset.duration||{default_dur};  
+      setTimeout(next,d);  
+    }}  
+    setTimeout(next,scenes[0].dataset.duration||{default_dur});  
+  </script>  
+</body>
+</html>"""
+
+# === API Endpoints ===
+@app.route('/diagnose', methods=['POST'])
+def diagnose():
+    if 'image' not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+    image_file = request.files['image']
+    image_bytes = image_file.read()
+    temp_path = os.path.join(DATA_DIR, 'images_to_classify', f"temp_{uuid.uuid4()}.jpg")
+    try:
+        with open(temp_path, 'wb') as f:
+            f.write(image_bytes)
+        diagnosis, details = call_gemini_api(image_bytes)
+        steps = call_openai_api(diagnosis, details)
+        return jsonify({
+            "diagnosis": diagnosis,
+            "details": details,
+            "steps": steps
+        })
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+@app.route('/animation/<diagnosis>', methods=['GET'])
+def get_animation(diagnosis):
+    steps = call_openai_api(diagnosis, "Based on previous diagnosis")
+    html_content = generate_animation_html(steps)
+    return render_template_string(html_content)
+
+@app.route('/')
+def index():
+    return app.send_static_file('index.html')
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=4000)
