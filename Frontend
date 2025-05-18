@@ -1,165 +1,428 @@
-import os
-import base64
-import json
-import requests
-import openai
-from flask import Flask, request, jsonify, render_template_string, send_file
-from PIL import Image
-import uuid
-from dotenv import load_dotenv
-from flask_cors import CORS
-
-# Load environment variables
-load_dotenv()
-
-app = Flask(__name__, static_folder='static', static_url_path='/static')
-CORS(app)
-
-# === Configuration ===
-DATA_DIR = "data"
-os.makedirs(os.path.join(DATA_DIR, 'images_to_classify'), exist_ok=True)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
-GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
-
-# === Helpers ===
-def encode_image_base64(image_bytes):
-    return base64.b64encode(image_bytes).decode('utf-8')
-
-def call_gemini_api(image_bytes):
-    print(f"Calling Gemini API for image")
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{
-            "parts": [
-                {
-                    "text": "Analyze this medical image for signs of trauma. Provide a diagnosis and detailed observations in the format: Diagnosis: [diagnosis]\nDetails: [details]."
-                },
-                {
-                    "inlineData": {
-                        "mimeType": "image/jpeg",
-                        "data": encode_image_base64(image_bytes)
-                    }
-                }
-            ]
-        }]
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LifeSaver</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: 'Segoe UI', sans-serif;
     }
-    try:
-        resp = requests.post(f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}", headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        if not text:
-            print("No response from Gemini API")
-            return "Unknown", "No response from API"
-        lines = text.split("\n")
-        diagnosis = lines[0].replace("Diagnosis: ", "") if lines and "Diagnosis:" in lines[0] else "Unknown"
-        details = "\n".join(lines[1:]).replace("Details: ", "") if len(lines) > 1 else "No details provided"
-        return diagnosis, details
-    except requests.exceptions.RequestException as e:
-        print(f"Gemini API error: {e}")
-        return "Error", f"Failed to process image: {str(e)}"
 
-def call_openai_api(diagnosis, details):
-    print(f"Calling OpenAI API for diagnosis: {diagnosis}")
-    prompt = f"""
-You are an expert paramedic assistant. A patient is experiencing: {diagnosis} ({details}).
-Provide a step-by-step first-aid procedure to help the patient until professional help arrives.
-Return the response as a JSON array of steps, where each step is an object with keys:
-  - icon: filename or URL for an icon representing the step (e.g., /static/icons/phone.png)
-  - text: instruction text
-  - duration: time in milliseconds to display this step
-Do not include any additional text outside the JSON array.
-"""
-    try:
-        completion = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
-        )
-        content = completion.choices[0].message.content.strip()
-        return json.loads(content)
-    except Exception as e:
-        print(f"OpenAI API error: {e}")
-        return [
-            {"icon": "/static/icons/phone.png", "text": "Call emergency services immediately.", "duration": 5000},
-            {"icon": "/static/icons/cpr.png", "text": "Monitor patient and wait for help.", "duration": 5000}
-        ]
+    html, body {
+      height: 100%;
+      width: 100%;
+      background-color: #262626;
+      overflow: hidden;
+    }
 
-def generate_animation_html(steps):
-    print("Generating animation HTML")
-    scenes = []
-    default_dur = 5000
-    for idx, step in enumerate(steps, start=1):
-        active = ' active' if idx == 1 else ''
-        dur = step.get('duration', default_dur)
-        scenes.append(f"""
-  <div id=\"scene{idx}\" class=\"scene{active}\" data-duration=\"{dur}\">  
-    <img src=\"{step.get('icon')}\" class=\"icon\" />  
-    <div class=\"text\">{step.get('text')}</div>  
-  </div>""")
-    return f"""<!DOCTYPE html>
-<html lang=\"en\">  
-<head>  
-  <meta charset=\"UTF-8\">  
-  <title>Trauma Aid Animation</title>  
-  <style>  
-    body, html {{margin:0;padding:0;width:100%;height:100%;overflow:hidden;font-family:sans-serif;background:#f0f0f0;}}  
-    .scene {{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity 1s;}}  
-    .scene.active {{opacity:1;}}  
-    .icon {{width:150px;height:150px;margin-bottom:1rem;}}  
-    .text {{font-size:1.5rem;text-align:center;max-width:80%;}}  
-  </style>  
-</head>  
-<body>  
-{''.join(scenes)}  
-  <script>  
-    const scenes = document.querySelectorAll('.scene');  
-    let current=0;  
-    function next() {{  
-      scenes[current].classList.remove('active');  
-      current=(current+1)%scenes.length;  
-      scenes[current].classList.add('active');  
-      const d=scenes[current].dataset.duration||{default_dur};  
-      setTimeout(next,d);  
-    }}  
-    setTimeout(next,scenes[0].dataset.duration||{default_dur});  
-  </script>  
+    canvas#chaotic-lines-heart {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      transition: transform 1.2s ease, opacity 1.2s ease;
+    }
+
+    #start-screen, #about-me-page {
+      position: absolute;
+      z-index: 2;
+      width: 100%;
+      height: 100%;
+      background-color: transparent;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.6s ease;
+    }
+
+    #start-screen.fade-out, #about-me-page.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #start-screen h1, #about-me-page h1 {
+      font-size: 3rem;
+      color: white;
+      text-shadow: 0 0 16px #ff3c6d;
+      margin-bottom: 40px;
+      transition: opacity 0.6s ease;
+    }
+
+    #about-me-page p {
+      color: white;
+      font-size: 18px;
+      max-width: 600px;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    button {
+      padding: 18px 36px;
+      font-size: 20px;
+      background: rgba(255, 255, 255, 0.05);
+      color: white;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 12px;
+      cursor: pointer;
+      backdrop-filter: blur(10px);
+      transition: background 0.3s ease, transform 0.3s ease;
+      box-shadow: 0 0 10px rgba(255, 60, 109, 0.2);
+    }
+
+    button:hover {
+      background: rgba(255, 60, 109, 0.2);
+      transform: translateY(-1px);
+    }
+
+    #about-button {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    #app {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      width: 100%;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 1s ease, visibility 0s 1s;
+      z-index: 1;
+    }
+
+    #app.show {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 1s ease, visibility 0s;
+    }
+
+    .layout {
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+      position: relative;
+    }
+
+    .sidebar {
+      width: 220px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      background-color: #262626;
+    }
+
+    .sidebar button {
+      margin-top: 20px;
+      width: 100%;
+    }
+
+    #app-title {
+      color: white;
+      text-shadow: 0 0 16px #ff3c6d;
+      font-size: 20px;
+      font-weight: bold;
+    }
+
+    .main {
+      flex: 1;
+      position: relative;
+      height: 100%;
+      overflow: hidden;
+      background-color: #1c1c1c;
+    }
+
+    video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      width: 100%;
+      object-fit: cover;
+      z-index: 1;
+      opacity: 0;
+      transform: scale(1.1);
+      transition: opacity 1.2s ease 0.3s, transform 1.2s ease 0.3s;
+    }
+
+    #app.show video {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    #captureBtn, #emergencyBtn {
+      position: absolute;
+      bottom: 40px;
+      z-index: 2;
+      opacity: 0;
+      transition: opacity 0.8s ease 0.8s, transform 0.8s ease 0.8s;
+    }
+
+    #captureBtn {
+      left: 50%;
+      transform: translateX(-50%) translateY(30px);
+    }
+
+    #emergencyBtn {
+      left: 75%;
+      transform: translateX(-50%) translateY(30px);
+    }
+
+    #app.show #captureBtn,
+    #app.show #emergencyBtn {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    #align-outline {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 60%;
+      height: 60%;
+      transform: translate(-50%, -50%);
+      border: 2px dashed rgba(255, 255, 255, 0.4);
+      border-radius: 12px;
+      z-index: 2;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    /* --- Analysis overlay --- */
+    #analysis-container {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.8);
+      display: none;
+      z-index: 10;
+    }
+    #analysis-container iframe {
+      width: 100%; height: 100%; border: none;
+    }
+    #analysis-container .close-btn {
+      position: absolute;
+      top: 12px; right: 12px;
+      background: #fff;
+      border: none;
+      font-size: 24px;
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      z-index: 11;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="chaotic-lines-heart"></canvas>
+
+  <div id="start-screen">
+    <h1 id="welcome-text">LifeSaver</h1>
+    <button onclick="enterApp()">Enter App</button>
+    <button id="about-button" onclick="showAboutMe()">About Me</button>
+  </div>
+
+  <div id="about-me-page" style="display: none;">
+    <h1>About Me</h1>
+    <p>Hello! Raunak, Aakarsh, and Joseph are the founders of LifeSaver. We designed this app to help you take pictures of people in crisis and give easy instructions to hopefully save their life.</p>
+    <button onclick="backToStart()">Back</button>
+  </div>
+
+  <div id="app" style="display: none;">
+    <div class="layout">
+      <div class="sidebar">
+        <div id="app-title">LifeSaver</div>
+        <button onclick="backToStartFromApp()">← Back</button>
+      </div>
+      <div class="main">
+        <video id="camera" autoplay playsinline muted></video>
+        <div id="align-outline"><span>Align Patient</span></div>
+        <button id="captureBtn" onclick="captureImage()">📸 Capture & Analyze</button>
+        <button id="emergencyBtn" onclick="alert('Calling 9-1-1...')">🚨 Call 9-1-1</button>
+
+        <!-- Analysis overlay -->
+        <div id="analysis-container">
+          <button class="close-btn" onclick="closeAnalysis()">×</button>
+          <iframe id="animationFrame" src="about:blank"></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function enterApp() {
+      document.getElementById("start-screen").style.display = "none";
+      document.getElementById("app").style.display = "block";
+      startCamera();
+      setTimeout(() => {
+        document.getElementById("app").classList.add("show");
+      }, 100);
+    }
+
+    function showAboutMe() {
+      document.getElementById("start-screen").style.display = "none";
+      document.getElementById("about-me-page").style.display = "flex";
+    }
+
+    function backToStart() {
+      document.getElementById("about-me-page").style.display = "none";
+      document.getElementById("start-screen").style.display = "flex";
+    }
+
+    function backToStartFromApp() {
+      document.getElementById("app").classList.remove("show");
+      setTimeout(() => {
+        document.getElementById("app").style.display = "none";
+        document.getElementById("start-screen").style.display = "flex";
+      }, 500);
+    }
+
+    async function startCamera() {
+      const video = document.getElementById("camera");
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = stream;
+      } catch (err) {
+        alert("Camera access denied.");
+        console.error(err);
+      }
+    }
+
+    async function captureImage() {
+      const video = document.getElementById("camera");
+      if (!video.videoWidth || !video.videoHeight) {
+        alert("Camera not ready.");
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      canvas.toBlob(async blob => {
+        const formData = new FormData();
+        formData.append('image', blob, 'capture.jpg');
+        try {
+          const res = await fetch('/diagnose', { method: 'POST', body: formData });
+          const data = await res.json();
+          if (res.ok) {
+            const diagnosis = encodeURIComponent(data.diagnosis);
+            document.getElementById('animationFrame').src = `/animation/${diagnosis}`;
+            document.getElementById('analysis-container').style.display = 'block';
+          } else {
+            alert(data.error || 'Analysis failed');
+          }
+        } catch (err) {
+          console.error(err);
+          alert('Network error during analysis');
+        }
+      }, 'image/jpeg');
+    }
+
+    function closeAnalysis() {
+      document.getElementById('animationFrame').src = 'about:blank';
+      document.getElementById('analysis-container').style.display = 'none';
+    }
+
+    // Chaotic lines animation (no changes)
+    const canvas = document.getElementById("chaotic-lines-heart");
+    const ctx = canvas.getContext("2d");
+    let width, height, pointsOrigin = [], e = [], targetPoints = [];
+    function resizeCanvas() {
+      width = canvas.width = window.innerWidth;
+      height = canvas.height = window.innerHeight;
+      ctx.fillStyle = "#262626";
+      ctx.fillRect(0, 0, width, height);
+    }
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+    const heartPosition = rad => [
+      Math.pow(Math.sin(rad), 3),
+      -(15 * Math.cos(rad) - 5 * Math.cos(2 * rad) - 2 * Math.cos(3 * rad) - Math.cos(4 * rad))
+    ];
+    const scaleAndTranslate = (pos, sx, sy, dx, dy) => [dx + pos[0] * sx, dy + pos[1] * sy];
+    for (let i = 0; i < Math.PI * 2; i += 0.1)
+      pointsOrigin.push(scaleAndTranslate(heartPosition(i), 180, 12, 0, 0));
+    const heartPointsCount = pointsOrigin.length;
+    function pulse(kx, ky) {
+      for (let i = 0; i < pointsOrigin.length; i++) {
+        targetPoints[i] = [
+          kx * pointsOrigin[i][0] + width / 2,
+          ky * pointsOrigin[i][1] + height / 2
+        ];
+      }
+    }
+    for (let i = 0; i < heartPointsCount; i++) {
+      let x = Math.random() * width;
+      let y = Math.random() * height;
+      e[i] = {
+        vx: 0, vy: 0,
+        speed: Math.random() + 5,
+        q: ~~(Math.random() * heartPointsCount),
+        D: 2 * (i % 2) - 1,
+        force: 0.25 * Math.random() + 0.75,
+        f: "hsla(0, 100%, 70%, 0.8)",
+        trace: Array.from({ length: 20 }, () => ({ x, y }))
+      };
+    }
+    const config = { traceK: 0.4, timeDelta: 0.01 };
+    let time = 0;
+    function loop() {
+      const n = -Math.cos(time);
+      pulse((1 + n) * 0.5, (1 + n) * 0.5);
+      time += (Math.sin(time) < 0 ? 9 : n > 0.75 ? 0.25 : 1) * config.timeDelta;
+      ctx.fillStyle = "#2626261a";
+      ctx.fillRect(0, 0, width, height);
+      for (let i = e.length; i--;) {
+        let u = e[i];
+        let q = targetPoints[u.q];
+        let dx = u.trace[0].x - q[0];
+        let dy = u.trace[0].y - q[1];
+        let length = Math.sqrt(dx*dx + dy*dy);
+        if (length < 10) {
+          if (0.95 < Math.random()) {
+            u.q = ~~(Math.random() * heartPointsCount);
+          } else {
+            if (0.99 < Math.random()) u.D *= -1;
+            u.q += u.D;
+            u.q %= heartPointsCount;
+            if (u.q < 0) u.q += heartPointsCount;
+          }
+        }
+        u.vx += (-dx/length)*u.speed;
+        u.vy += (-dy/length)*u.speed;
+        u.trace[0].x += u.vx;
+        u.trace[0].y += u.vy;
+        u.vx *= u.force;
+        u.vy *= u.force;
+        for (let k = 0; k < u.trace.length-1;) {
+          const T = u.trace[k];
+          const N = u.trace[++k];
+          N.x -= config.traceK*(N.x - T.x);
+          N.y -= config.traceK*(N.y - T.y);
+        }
+        ctx.fillStyle = u.f;
+        for (let k = 0; k < u.trace.length; k++) {
+          ctx.fillRect(u.trace[k].x, u.trace[k].y, 1, 1);
+        }
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+  </script>
 </body>
-</html>"""
-
-# === API Endpoints ===
-@app.route('/diagnose', methods=['POST'])
-def diagnose():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image provided"}), 400
-    image_file = request.files['image']
-    image_bytes = image_file.read()
-    temp_path = os.path.join(DATA_DIR, 'images_to_classify', f"temp_{uuid.uuid4()}.jpg")
-    try:
-        with open(temp_path, 'wb') as f:
-            f.write(image_bytes)
-        diagnosis, details = call_gemini_api(image_bytes)
-        steps = call_openai_api(diagnosis, details)
-        return jsonify({
-            "diagnosis": diagnosis,
-            "details": details,
-            "steps": steps
-        })
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-@app.route('/animation/<diagnosis>', methods=['GET'])
-def get_animation(diagnosis):
-    steps = call_openai_api(diagnosis, "Based on previous diagnosis")
-    html_content = generate_animation_html(steps)
-    return render_template_string(html_content)
-
-@app.route('/')
-def index():
-    return app.send_static_file('index.html')
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=4000)
+</html>
